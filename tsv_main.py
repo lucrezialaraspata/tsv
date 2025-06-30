@@ -312,19 +312,7 @@ def test_model(model, centroids, test_prompts, test_labels, device, batch_size, 
     
     return val_predictions, val_labels_combined
 
-# def get_last_non_padded_token_rep(hidden_states, attention_mask):
-#     """
-#     Get the last non-padded token's representation for each sequence in the batch.
-#     """
-#     # Find the length of each sequence by summing the attention mask (1 for real tokens, 0 for padding)
-#     lengths = attention_mask.squeeze().sum(dim=1).long()
 
-#     # Index the last non-padded token for each sequence
-#     batch_size, max_seq_len, hidden_size = hidden_states.size()
-#     last_token_reps = torch.stack([hidden_states[i, lengths[i]-1, :] for i in range(batch_size)])
-
-#     return last_token_reps
-     
 HF_NAMES = {
     'llama3.1-8B': 'meta-llama/Meta-Llama-3.1-8B',
     'qwen2.5-7B': 'Qwen/Qwen2.5-7B'
