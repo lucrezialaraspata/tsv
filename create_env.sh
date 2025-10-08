@@ -3,4 +3,4 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 
 huggingface-cli download --repo-type dataset truthfulqa/truthful_qa
-#huggingface-cli download meta-llama/Llama-3.1-8B
+huggingface-cli download meta-llama/Llama-3.1-8B
