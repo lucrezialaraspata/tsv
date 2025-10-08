@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import argparse
 from train_utils import get_last_non_padded_token_rep, compute_ot_loss_cos, update_centroids_ema, update_centroids_ema_hard, get_ex_data, collate_fn
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from llm_layers import add_tsv_layers
 from sklearn.metrics import roc_auc_score
 from torch.cuda.amp import autocast, GradScaler
@@ -14,6 +14,16 @@ import torch.nn.functional as F
 from sinkhorn_knopp import SinkhornKnopp_imb
 import logging
 
+
+def create_bnb_config():
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+
+    return bnb_config
 
 def seed_everything(seed: int):
     import random, os
@@ -33,15 +43,15 @@ def train_model(model, optimizer, device, prompts, labels, args):
     
     layer_number = -1
     dir_name = f"TSV_{args.model_name}_{args.dataset_name}/exemplar_num_{args.num_exemplars}_num_selected_data_{args.num_selected_data}/{args.component}/{args.str_layer}/{args.lam}"
-    log_dir = f"/{dir_name}/"
+    log_dir = f"{dir_name}/"
     log_file = os.path.join(log_dir, f"log.txt")
     os.makedirs(dir_name,exist_ok=True)
     
     logging.basicConfig(
-    filename=log_file,
-    filemode="w",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",)
+        filename=log_file,
+        filemode="w",
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",)
     
     logging.info("Starting training")
     logging.info(f"Training parameters: few_shot_size={args.num_exemplars}, num_selected_data={args.num_selected_data}, component={args.component}, str_layer={args.str_layer}")
@@ -382,9 +392,9 @@ def main():
     if args.gene:
         device = "cuda"
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=True)
-        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, token=True)
+        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, quantization_config=create_bnb_config(), low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, token=True)
 
-        model = model.to(device)
+        #model = model.to(device)
         print(model.device)
 
         all_decoded_answers = []
@@ -571,10 +581,10 @@ def main():
     else:
         
         device = "cuda"
-        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, token=True)
+        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, quantization_config=create_bnb_config(), low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, token=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=True)
 
-        model = model.to(device)
+        #model = model.to(device)
         
         prompts = []
         qa_pairs = []
