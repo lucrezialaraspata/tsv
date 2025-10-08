@@ -189,13 +189,13 @@ tf-slim==1.1.0
 tfds-nightly==4.9.0.dev202304110044
 threadpoolctl==3.1.0
 tiktoken==0.7.0
-tokenizers==0.21.4
+tokenizers==0.19.1
 toml==0.10.2
 tomli==2.2.1
 torch==2.8.0
 tqdm==4.64.1
 traitlets==5.14.3
-transformers @ git+https://github.com/huggingface/transformers.git@cdfe49a4d0a364c4bdf2b828b67403994f00b092
+transformers==4.43.1
 triton==3.4.0
 tsne-torch==1.0.1
 types-pytz==2022.6.0.1
