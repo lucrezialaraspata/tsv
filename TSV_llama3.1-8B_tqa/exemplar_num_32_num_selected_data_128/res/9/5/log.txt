@@ -1,0 +1,2 @@
+2025-10-08 16:50:56,471 - INFO - Starting training
+2025-10-08 16:50:56,471 - INFO - Training parameters: few_shot_size=32, num_selected_data=128, component=res, str_layer=9
