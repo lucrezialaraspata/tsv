@@ -314,12 +314,12 @@ def test_model(model, centroids, test_prompts, test_labels, device, batch_size, 
 
 
 HF_NAMES = {
-    'llama3.1-8B': 'meta-llama/Meta-Llama-3.1-8B',
+    'llama3.1-8B': 'meta-llama/Llama-3.1-8B',
     'qwen2.5-7B': 'Qwen/Qwen2.5-7B'
 }
 
-def main(): 
 
+def main(): 
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, default='llama3.1-8B')
     parser.add_argument('--model_prefix', type=str, default='', help='prefix of model name')
@@ -380,19 +380,22 @@ def main():
     
 
     if args.gene:
+        device = "cuda"
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=True)
+        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, token=True)
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token = '')
-        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, low_cpu_mem_usage=True, torch_dtype=torch.float16, device_map="auto", token = '')
-        device = torch.device("cuda")
+        model = model.to(device)
+        print(model.device)
+
         all_decoded_answers = []
         begin_index = 0
         end_index = len(dataset)
         
         if not os.path.exists(f'./save_for_eval/{args.dataset_name}_hal_det/'):
-            os.mkdir(f'./save_for_eval/{args.dataset_name}_hal_det/')
+            os.makedirs(f'./save_for_eval/{args.dataset_name}_hal_det/', exist_ok=True)
 
         if not os.path.exists(f'./save_for_eval/{args.dataset_name}_hal_det/answers'):
-            os.mkdir(f'./save_for_eval/{args.dataset_name}_hal_det/answers')
+            os.makedirs(f'./save_for_eval/{args.dataset_name}_hal_det/answers', exist_ok=True)
 
         period_token_id = [tokenizer(_)['input_ids'][-1] for _ in ['\n']]
         period_token_id += [tokenizer.eos_token_id]
@@ -402,7 +405,7 @@ def main():
             answers_ = [None] * args.num_gene
             
             question = dataset[i]['question']
-            prompt = tokenizer(f"Answer the question concisely. Q: {question}" + " A:", return_tensors='pt').input_ids.cuda()
+            prompt = tokenizer(f"Answer the question concisely. Q: {question}" + " A:", return_tensors='pt').input_ids.to(device)
             
             for gen_iter in range(args.num_gene):
                 if args.most_likely:
@@ -567,9 +570,11 @@ def main():
                 
     else:
         
-        device = torch.device("cuda")
-        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, low_cpu_mem_usage=True, torch_dtype=torch.float16, device_map="auto", token = '')
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token = '')
+        device = "cuda"
+        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, token=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=True)
+
+        model = model.to(device)
         
         prompts = []
         qa_pairs = []
