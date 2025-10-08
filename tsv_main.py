@@ -457,13 +457,13 @@ def main():
 
     if args.dataset_name == "tqa":
         if args.use_local:
-            local_model_path = get_weight_dir("truthful_qa", repo_type="datasets", subset="generation")
-            dataset = load_dataset("parquet", data_dir=local_model_path)['validation']
+            local_model_path = get_weight_dir("truthfulqa/truthful_qa", repo_type="datasets", subset="generation")
+            dataset = load_dataset("parquet", data_files={"validation": os.path.join(local_model_path, "validation-00000-of-00001.parquet")})["validation"]
         else:
             dataset = load_dataset("truthful_qa", 'generation')['validation']
     elif args.dataset_name == 'triviaqa':
         if args.use_local:
-            local_model_path = get_weight_dir("trivia_qa", repo_type="datasets", subset="rc.nocontext")
+            local_model_path = get_weight_dir("mandarjoshi/trivia_qa", repo_type="datasets", subset="rc.nocontext")
             dataset = load_dataset("parquet", data_dir=local_model_path)['validation']
         else:
             dataset = load_dataset("trivia_qa", "rc.nocontext", split="validation")
