@@ -13,6 +13,12 @@ from torch.cuda.amp import autocast, GradScaler
 import torch.nn.functional as F
 from sinkhorn_knopp import SinkhornKnopp_imb
 import logging
+from pathlib import Path
+from typing import Union, Any
+from accelerate import PartialState
+
+
+HF_DEFAULT_HOME = os.environ.get("HF_HOME", "~/.cache/huggingface/hub")
 
 
 def create_bnb_config():
@@ -24,6 +30,91 @@ def create_bnb_config():
     )
 
     return bnb_config
+
+
+def get_weight_dir(
+    model_ref: str,
+    *,
+    model_dir: Union[str, os.PathLike[Any]] = HF_DEFAULT_HOME,
+    revision: str = "main",
+    repo_type="models",
+    dataset_extension="json",
+    subset=None,
+) -> Path:
+    """
+    Parse model name to locally stored weights.
+    Args:
+        model_ref (str) : Model reference containing org_name/model_name such as 'meta-llama/Llama-2-7b-chat-hf'.
+        revision (str): Model revision branch. Defaults to 'main'.
+        model_dir (str | os.PathLike[Any]): Path to directory where models are stored. Defaults to value of $HF_HOME (or present directory)
+
+    Returns:
+        str: path to model weights within model directory
+    """
+    model_dir = Path(model_dir)
+    assert model_dir.is_dir(), f"Model directory {model_dir} does not exist or is not a directory."
+
+    model_path = Path(os.path.join(model_dir, "hub", "--".join([repo_type, *model_ref.split("/")])))
+    assert model_path.is_dir(), f"Model path {model_path} does not exist or is not a directory."
+    
+    snapshot_hash = (model_path / "refs" / revision).read_text()
+    weight_dir = model_path / "snapshots" / snapshot_hash
+    assert weight_dir.is_dir(), f"Weight directory {weight_dir} does not exist or is not a directory."
+
+    if repo_type == "datasets":
+        if subset is not None:
+            weight_dir = weight_dir / subset
+        else:
+            # For datasets, we need to return the directory containing the dataset files
+            if dataset_extension == "json":
+                weight_dir = weight_dir / "data"
+    
+    return weight_dir
+
+
+def load_llm(model_name, bnb_config, local=False, dtype=torch.bfloat16, use_device_map=True, use_flash_attention=False):
+    n_gpus = torch.cuda.device_count()
+    max_memory = {i: "10000MB" for i in range(n_gpus)}
+    attention = "flash_attention_2" if use_flash_attention else "eager"
+    device_string = PartialState().process_index
+    max_memory_config = max_memory if use_device_map else None
+
+    if not local:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            use_cache=False,
+            attn_implementation=attention,
+            quantization_config=bnb_config,
+            torch_dtype=dtype,
+            device_map="auto",  #{'':device_string},#device_map_config,       #{'':device_string},           #{"": 0},  # forces model to cuda:0 otherwise set as done in the else branch
+            max_memory=max_memory_config
+        )
+    else:
+        model_local_path = get_weight_dir(model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_local_path,
+            local_files_only=True,
+            use_cache=False,
+            attn_implementation=attention,
+            quantization_config=bnb_config,
+            torch_dtype=dtype,
+            device_map={'':device_string}, #device_map_config,       #{'':device_string}, # dispatch efficiently the model on the available ressources
+            max_memory=max_memory_config,
+        )
+
+    return model
+
+
+def load_tokenizer(model_name, local=False):
+    if not local:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, token=True)
+    else:
+        model_local_path = get_weight_dir(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_local_path, local_files_only=True, token=True)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    return tokenizer
+
 
 def seed_everything(seed: int):
     import random, os
@@ -357,16 +448,26 @@ def main():
     parser.add_argument("--optimizer", type=str, default='AdamW')
     parser.add_argument("--num_iters_sk", type=int, default=3)
     parser.add_argument("--epsilon_sk", type=float, default=0.05)
+    parser.add_argument("--use_local", action="store_true", help="Use local model instead of remote.")
+
     
     args = parser.parse_args()
         
     model_name_or_path = HF_NAMES[args.model_prefix + args.model_name]
 
     if args.dataset_name == "tqa":
-        dataset = load_dataset("truthful_qa", 'generation')['validation']
-    
+        if args.use_local:
+            local_model_path = get_weight_dir("truthful_qa", repo_type="datasets", subset="generation")
+            dataset = load_dataset("parquet", data_dir=local_model_path)['validation']
+        else:
+            dataset = load_dataset("truthful_qa", 'generation')['validation']
     elif args.dataset_name == 'triviaqa':
-        dataset = load_dataset("trivia_qa", "rc.nocontext", split="validation")
+        if args.use_local:
+            local_model_path = get_weight_dir("trivia_qa", repo_type="datasets", subset="rc.nocontext")
+            dataset = load_dataset("parquet", data_dir=local_model_path)['validation']
+        else:
+            dataset = load_dataset("trivia_qa", "rc.nocontext", split="validation")
+
         id_mem = set()
     
         def remove_dups(batch):
@@ -376,15 +477,18 @@ def main():
             return batch
 
         dataset = dataset.map(remove_dups, batch_size=1, batched=True, load_from_cache_file=False)
-        
-        
     elif args.dataset_name == 'sciq':
-        dataset = load_dataset("allenai/sciq", split="validation")
-        
+        if args.use_local:
+            local_model_path = get_weight_dir("allenai/sciq", repo_type="datasets")
+            dataset = load_dataset("json", data_dir=local_model_path)['validation']
+        else:
+            dataset = load_dataset("allenai/sciq", split="validation")
     elif args.dataset_name == 'nq_open':
-        dataset = load_dataset("google-research-datasets/nq_open", split="validation") 
-        
-            
+        if args.use_local:
+            local_model_path = get_weight_dir("google-research-datasets/nq_open", repo_type="datasets")
+            dataset = load_dataset("json", data_dir=local_model_path)['validation']
+        else:
+            dataset = load_dataset("google-research-datasets/nq_open", split="validation") 
     else:
         raise ValueError("Invalid dataset name")
     
@@ -581,8 +685,8 @@ def main():
     else:
         
         device = "cuda"
-        model = AutoModelForCausalLM.from_pretrained(model_name_or_path, quantization_config=create_bnb_config(), low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, token=True)
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=True)
+        model = load_llm(model_name_or_path, bnb_config=create_bnb_config(), local=args.use_local)
+        tokenizer = load_tokenizer(model_name_or_path, local=args.use_local)
 
         #model = model.to(device)
         
