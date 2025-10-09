@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 from typing import Union, Any
 from accelerate import PartialState
+import gc
 
 
 HF_DEFAULT_HOME = os.environ.get("HF_HOME", "~/.cache/huggingface/hub")
@@ -151,7 +152,11 @@ def train_model(model, optimizer, device, prompts, labels, args):
     test_labels, train_labels, exemplar_labels = labels[0], labels[1], labels[2]
     batch_size = args.batch_size
     num_samples = len(train_prompts)
-    
+
+    del prompts, labels
+    gc.collect()
+    torch.cuda.empty_cache()
+
     losses = []
     best_test_auroc = -1
 
@@ -159,7 +164,6 @@ def train_model(model, optimizer, device, prompts, labels, args):
 
     num_exemplars = args.num_exemplars
 
-    # Initialize Sinkhorn algorithm
     args.num_iters_sk = 3
     args.epsilon_sk = 0.05
     
@@ -167,13 +171,12 @@ def train_model(model, optimizer, device, prompts, labels, args):
     ex_true = (exemplar_labels[:num_exemplars].sum())/num_exemplars
     cls_dist = torch.tensor([ex_hallu,ex_true]).float().cuda()
     cls_dist = cls_dist.view(-1, 1) 
-    sinkhorn = SinkhornKnopp_imb(args, cls_dist)
    
     # Initialize Centroids
     centroids = torch.randn((2, model.config.hidden_size)).half().cuda() 
     centroids = F.normalize(centroids, p=2, dim=1)   
     
-    exemplar_prompts_, exemplar_labels_ = exemplar_prompts, exemplar_labels    
+    exemplar_prompts_, _ = exemplar_prompts, exemplar_labels    
     exemplar_prompts, exemplar_labels = collate_fn(exemplar_prompts, exemplar_labels) 
 
     num_epochs = args.init_num_epochs
@@ -198,7 +201,7 @@ def train_model(model, optimizer, device, prompts, labels, args):
             attention_mask = attention_mask.to(batch_prompts.device)
             
             # Forward pass
-            with autocast(dtype=torch.float16):
+            with autocast(dtype=torch.bfloat16):
                 
                 output = model(batch_prompts.squeeze(), attention_mask=attention_mask.squeeze(),  output_hidden_states=True)
                 
@@ -207,13 +210,15 @@ def train_model(model, optimizer, device, prompts, labels, args):
                 hidden_states = torch.stack(hidden_states, dim=0).squeeze()
             
                 last_layer_hidden_state = hidden_states[layer_number]  # Shape: [batch_size, max_seq_len, hidden_size]
-                
+
                 # Use attention mask to ignore padding tokens, and get the last non-padded token's representation
                 last_token_rep = get_last_non_padded_token_rep(last_layer_hidden_state, attention_mask.squeeze())  
                 
+                del output, hidden_states, last_layer_hidden_state  # free memory
+                
                 batch_labels_oh = torch.nn.functional.one_hot(batch_labels, num_classes=-1)
                 
-                ot_loss, similarities = compute_ot_loss_cos(last_token_rep, centroids, batch_labels_oh, batch_size, args)
+                ot_loss, _ = compute_ot_loss_cos(last_token_rep, centroids, batch_labels_oh, batch_size, args)
                 
                 loss = ot_loss 
                 
@@ -221,20 +226,26 @@ def train_model(model, optimizer, device, prompts, labels, args):
                 
                 with torch.no_grad():
                      centroids = update_centroids_ema_hard(centroids, last_token_rep, batch_labels_oh, args)
+
+                del batch_labels_oh, last_token_rep
+                gc.collect()
+                torch.cuda.empty_cache()
                     
             # loss.backward()
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
             
             running_loss += loss.item() * batch_labels.size(0) 
+            gc.collect()
+            torch.cuda.empty_cache()
           
         # Epoch summary
         epoch_loss = running_loss / total  
 
         if (epoch+1) % 1 == 0:
-            
             test_labels_ = test_labels
             test_predictions, test_labels_combined = test_model(model, centroids, test_prompts, test_labels_, device, batch_size, layer_number)
             
@@ -259,15 +270,29 @@ def train_model(model, optimizer, device, prompts, labels, args):
             f"Train Loss: {epoch_loss:.4f}, ")
             
             logging.info(f"Test AUROC: {test_auroc:.4f}")
-            print(f"Epoch [{epoch+1}/{num_epochs}],Test AUROC: {test_auroc:.4f}")           
+            print(f"Epoch [{epoch+1}/{num_epochs}],Test AUROC: {test_auroc:.4f}")    
+
+            del test_labels_, test_predictions, test_labels_combined, test_auroc
+            gc.collect()
+            torch.cuda.empty_cache()       
     
     logging.info(f"SS Learning Starts")
+
+    gc.collect()
+    torch.cuda.empty_cache()
     
     with torch.no_grad():
-   
+        sinkhorn = SinkhornKnopp_imb(args, cls_dist)
         selected_indices, selected_labels_soft = get_ex_data(model, train_prompts, train_labels, batch_size, centroids, sinkhorn, args.num_selected_data, cls_dist, args)
-        
+
         num_samples = len(selected_indices) + args.num_exemplars
+
+        del sinkhorn, cls_dist
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    gc.collect()
+    torch.cuda.empty_cache()
         
     num_epochs = args.aug_num_epochs
     
@@ -275,17 +300,20 @@ def train_model(model, optimizer, device, prompts, labels, args):
 
     selected_prompts = [train_prompts[i] for i in selected_indices] 
     selected_labels = selected_labels_soft
-    
+
     augmented_prompts = selected_prompts + exemplar_prompts_
     exemplar_labels = torch.nn.functional.one_hot(exemplar_label.to(torch.int64), num_classes=2)
     augmented_labels = torch.concat((selected_labels, torch.tensor(exemplar_labels).clone().cuda()))
-    
+
     augmented_prompts_train = augmented_prompts
     augmented_labels_label = augmented_labels
-    
     num_samples = len(augmented_prompts_train)
+
+    del exemplar_label, exemplar_labels, selected_labels, exemplar_prompts_, selected_prompts, augmented_prompts, augmented_labels
+    gc.collect()
+    torch.cuda.empty_cache()
     
-    with autocast(dtype=torch.float16):                   
+    with autocast(dtype=torch.bfloat16):                   
         for epoch in range(num_epochs):
             running_loss = 0.0
             total = 0
@@ -304,7 +332,7 @@ def train_model(model, optimizer, device, prompts, labels, args):
                 batch_labels = batch_labels.to(device)
                 attention_mask = attention_mask.to(batch_prompts.device)
 
-                output = model(batch_prompts.squeeze(), attention_mask=attention_mask.squeeze(),  output_hidden_states=True)
+                output = model(batch_prompts.squeeze(), attention_mask=attention_mask.squeeze(), output_hidden_states=True)
                 
                 hidden_states = output.hidden_states
                 
@@ -316,13 +344,13 @@ def train_model(model, optimizer, device, prompts, labels, args):
                 # Use attention mask to ignore padding tokens, and get the last non-padded token's representation
                 last_token_rep = get_last_non_padded_token_rep(last_layer_hidden_state, attention_mask.squeeze())  # Shape: [batch_size, hidden_size]
 
-                
-                ot_loss, similarities = compute_ot_loss_cos(last_token_rep, centroids, batch_labels, batch_size, args)
+                del output, hidden_states, last_layer_hidden_state, attention_mask  # free memory
+
+                ot_loss, _ = compute_ot_loss_cos(last_token_rep, centroids, batch_labels, batch_size, args)
                 
                 loss = ot_loss 
 
-                with torch.no_grad():
-                    
+                with torch.no_grad():                    
                    centroids = update_centroids_ema(centroids, last_token_rep, batch_labels.half(), args)
                    all_labels.append(batch_labels.cpu()) 
                    total += batch_labels.size(0)
@@ -334,6 +362,9 @@ def train_model(model, optimizer, device, prompts, labels, args):
                 # Accumulate the loss
                 running_loss += loss.item() * batch_labels.size(0)  
 
+                gc.collect()
+                torch.cuda.empty_cache()
+
             epoch_loss = running_loss / total  # Normalize loss by total samples
             
             
@@ -342,8 +373,11 @@ def train_model(model, optimizer, device, prompts, labels, args):
                 test_labels_ = test_labels
              
                 if epoch % 1 ==0:
-                   test_predictions, test_labels_combined = test_model(model, centroids, test_prompts, test_labels_, device, batch_size, layer_number)
-                   test_auroc = roc_auc_score(test_labels_combined, test_predictions)
+                    test_predictions, test_labels_combined = test_model(model, centroids, test_prompts, test_labels_, device, batch_size, layer_number)
+                    test_auroc = roc_auc_score(test_labels_combined, test_predictions)
+
+                    gc.collect()
+                    torch.cuda.empty_cache()
                    
             print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}")
 
@@ -362,6 +396,9 @@ def train_model(model, optimizer, device, prompts, labels, args):
            
             logging.info(f"Best test AUROC: {best_test_auroc:.4f}, at epoch: {best_test_epoch}")
             
+            gc.collect()
+            torch.cuda.empty_cache()
+
         return best_test_auroc
 
 
@@ -376,7 +413,7 @@ def test_model(model, centroids, test_prompts, test_labels, device, batch_size, 
     num_val_samples = len(test_prompts)
     
     with torch.no_grad():
-        with autocast(dtype=torch.float16):
+        with autocast(dtype=torch.bfloat16):
             for batch_start in range(0, num_val_samples, batch_size):
                 batch_prompts = test_prompts[batch_start:batch_start + batch_size]
                 batch_labels = test_labels[batch_start:batch_start + batch_size]
@@ -399,14 +436,16 @@ def test_model(model, centroids, test_prompts, test_labels, device, batch_size, 
                 last_token_rep = F.normalize(last_token_rep, p=2, dim=-1)
                 centroids = F.normalize(centroids, p=2, dim=-1)
                 
-                with autocast(dtype=torch.float16):
+                with autocast(dtype=torch.bfloat16):
                     similarities = torch.matmul(last_token_rep, centroids.T)  # Shape: [256, 2]
 
                 similarity_scores  = torch.softmax(similarities/ 0.1, dim=-1)
                 similarity_scores  = similarity_scores[:,1] 
                 val_predictions.append(similarity_scores.cpu())
                 val_labels_combined.append(batch_labels.cpu())
-      
+
+                gc.collect()
+                torch.cuda.empty_cache()
 
     val_predictions = torch.cat(val_predictions)
     val_labels_combined = torch.cat(val_labels_combined)
@@ -432,7 +471,7 @@ def main():
     parser.add_argument('--wild_ratio', type=float, default=0.75)
     parser.add_argument('--thres_gt', type=float, default=0.5)
     parser.add_argument('--most_likely', type=int, default=0)
-    parser.add_argument("--model_dir", type=str, default=None, help='local directory with model data')
+    parser.add_argument("--model_dir", type=str, default=None, help='where to save the model')
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--cos_temp", type=float, default=0.1)
     parser.add_argument("--ema_decay", type=float, default=0.99)
@@ -790,6 +829,9 @@ def main():
         optimizer = torch.optim.AdamW(list(tsv.parameters()), lr=args.lr)
 
         train_model(model, optimizer, device, prompts, labels, args=args)
+
+        os.makedirs(args.model_dir, exist_ok=True)
+        torch.save(tsv.state_dict(), os.path.join(args.model_dir, 'tsv.pt'))
 
 if __name__ == '__main__':
     seed_everything(42)

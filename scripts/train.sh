@@ -17,5 +17,6 @@
 
 source .venv/bin/activate
 
-# Top 10 best layers for Adapter over all datasets
-srun -u python tsv_main.py  --model_name llama3.1-8B  --dataset_name tqa --most_likely 1 --use_local
+module load cuda/12.2
+
+srun -u python tsv_main.py  --model_name llama3.1-8B  --dataset_name tqa --batch_size 8 --most_likely 1 --model_dir model --use_local
